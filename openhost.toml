@@ -16,15 +16,21 @@ health_check = "/_healthz"
 # Spliit's sharing model: a group is reached purely by its unguessable
 # nanoid URL (/groups/<id>...). To let the owner share a group with friends
 # who do not have an OpenHost account, we expose the group pages plus the
-# API and static assets those pages need. The landing page ("/"), the
-# recent-groups list, and /groups/create are NOT public, so only the
-# zone_auth'd owner can create groups or see the app shell.
+# API and static assets those pages need. The landing page ("/") is not
+# listed, so the app shell stays owner-gated by the router.
+#
+# The router's public-path matching is PREFIX-based, so listing "/groups/"
+# also (unavoidably) exposes the fixed /groups/create page and the /groups
+# recent-list, and listing "/api/" exposes the tRPC groups.create mutation.
+# Those specific owner-only paths are therefore re-gated in
+# openhost/auth_proxy.py (it checks the router-stamped X-OpenHost-Is-Owner
+# header). So the split of responsibility is: the ROUTER does the bulk of
+# the gating via these prefixes, and the AUTH-PROXY additionally re-gates the
+# few owner-only paths that collide with a public prefix. Keep the proxy's
+# OWNER_ONLY_* lists in sync with these entries.
 #
 # IMPORTANT: never list "/" here — the router treats it as a catch-all
 # prefix that would make the entire app public and break owner SSO.
-#
-# These MUST stay conceptually in sync with the app's routes; the auth-proxy
-# itself does not gate (the router does), it only fixes forwarding headers.
 public_paths = [
     "/_healthz",
     # Shared group pages (view / edit / add expenses / balances / stats /

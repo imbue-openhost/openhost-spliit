@@ -77,9 +77,8 @@ leaves the container.
 
 So the effective model is: **only the zone_auth'd owner can create groups**,
 but the owner can share any group by link and recipients need no OpenHost
-account. If you want a fully private instance (no anonymous access at all),
-remove the `/groups/` and `/api/` entries from `openhost.toml`'s
-`public_paths`.
+account (see the "fully private instance" note in the Auth model section
+above to lock it down further).
 
 ## Layout
 

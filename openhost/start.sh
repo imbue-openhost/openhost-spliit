@@ -8,8 +8,11 @@
 #   3. The Next.js standalone server on 127.0.0.1:3000.
 #   4. The Python auth-proxy on 0.0.0.0:8080 (the OpenHost-routed port).
 #
-# All long-lived children are supervised with `wait -n`; if any exits the
-# whole container exits so OpenHost restarts it cleanly.
+# Supervision: Next.js and the proxy run as shell children; Postgres is
+# daemonized by pg_ctl (not a shell child), so a background liveness monitor
+# stands in for it. `wait -n` watches Next, the proxy, and that monitor — if
+# any of the three exits, the whole container exits so OpenHost restarts it
+# cleanly.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -25,7 +28,15 @@ PG_DB="spliit"
 # Bundled DB is loopback-only, so the password never leaves the container.
 # It is derived from the OpenHost app token if present, else a fixed local
 # value (the DB is not reachable from outside the container in any case).
-PG_PASSWORD="${OPENHOST_APP_TOKEN:-spliit_local_only}"
+# The bundled DB is loopback-only (never reachable from outside the
+# container), so its password is not a meaningful external secret. We
+# generate a fresh RANDOM ALPHANUMERIC password on every boot and (re)apply
+# it to the role below. Alphanumeric-only guarantees it is safe to embed in
+# both the SQL role definition and the Prisma connection URL without any
+# quoting/escaping — avoiding the SQL-syntax / URL-parse breakage (and
+# crash-loops) that a password with special characters would cause. Nothing
+# is persisted to disk.
+PG_PASSWORD="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
 APP_PORT=3000
 PROXY_PORT=8080
@@ -59,13 +70,20 @@ start_db() {
 }
 
 bootstrap_role_and_db() {
-  # Wait for readiness.
+  # Wait for readiness; fail hard (and let the container restart) if the DB
+  # never comes up, rather than proceeding into cryptic psql errors.
+  local ready=""
   for i in $(seq 1 30); do
     if su-exec postgres pg_isready -h "${PGSOCKET_DIR}" -p "${PG_PORT}" >/dev/null 2>&1; then
+      ready=1
       break
     fi
     sleep 1
   done
+  if [ -z "${ready}" ]; then
+    log "FATAL: PostgreSQL did not become ready within 30s"
+    exit 1
+  fi
 
   # Create role + database idempotently.
   su-exec postgres psql -h "${PGSOCKET_DIR}" -p "${PG_PORT}" -d postgres -v ON_ERROR_STOP=1 <<SQL
@@ -120,18 +138,35 @@ UPSTREAM_HOST=127.0.0.1 UPSTREAM_PORT="${APP_PORT}" LISTEN_PORT="${PROXY_PORT}" 
   python3 /usr/app/openhost/auth_proxy.py &
 PROXY_PID=$!
 
-log "All services started (next=${NEXT_PID} proxy=${PROXY_PID})"
+# --- 5. PostgreSQL liveness monitor ---------------------------------------
+# pg_ctl daemonizes the postmaster, so Postgres is NOT a child of this script
+# and `wait -n` cannot see it. This background loop polls the DB and exits
+# (becoming the child that `wait -n` observes) if Postgres ever stops
+# responding — so a dead DB tears the whole container down for OpenHost to
+# restart, instead of leaving Next.js serving errors behind a green health
+# check.
+(
+  while su-exec postgres pg_isready -h "${PGSOCKET_DIR}" -p "${PG_PORT}" >/dev/null 2>&1; do
+    sleep 10
+  done
+  echo "[start.sh] PostgreSQL stopped responding"
+) &
+PG_MONITOR_PID=$!
+
+log "All services started (next=${NEXT_PID} proxy=${PROXY_PID} pg-monitor=${PG_MONITOR_PID})"
 
 # --- Supervision -----------------------------------------------------------
 terminate() {
   log "Shutting down"
-  kill "${NEXT_PID}" "${PROXY_PID}" 2>/dev/null || true
+  kill "${NEXT_PID}" "${PROXY_PID}" "${PG_MONITOR_PID}" 2>/dev/null || true
   su-exec postgres pg_ctl -D "${PGDATA}" -m fast -w stop 2>/dev/null || true
-  exit 0
+  exit "${1:-0}"
 }
-trap terminate TERM INT
+trap 'terminate 0' TERM INT
 
-# Exit as soon as any critical child dies.
-wait -n "${NEXT_PID}" "${PROXY_PID}"
+# Exit as soon as any supervised process (Next, the proxy, or the Postgres
+# monitor) dies. `|| true` keeps `set -e` from short-circuiting past the
+# teardown when the exiting child had a non-zero status.
+wait -n "${NEXT_PID}" "${PROXY_PID}" "${PG_MONITOR_PID}" || true
 log "A supervised process exited; tearing down"
-terminate
+terminate 1

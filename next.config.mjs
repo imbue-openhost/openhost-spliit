@@ -22,23 +22,6 @@ if (process.env.S3_UPLOAD_ENDPOINT) {
   })
 }
 
-/**
- * Server Actions origin allow-list.
- *
- * Next.js rejects a forwarded Server Action request unless the `Origin`
- * header host matches the `x-forwarded-host`/`host` header, OR the origin
- * is present in this allow-list. Behind the OpenHost router the auth-proxy
- * keeps `Origin` and `X-Forwarded-Host` consistent, so same-origin
- * mutations pass without this list. We still allow the zone domain (and a
- * wildcard for OpenHost zones) at build time as a belt-and-suspenders
- * measure for infra that rewrites one header but not the other.
- */
-const serverActionAllowedOrigins = ['localhost:3000']
-if (process.env.OPENHOST_ZONE_DOMAIN) {
-  serverActionAllowedOrigins.push(process.env.OPENHOST_ZONE_DOMAIN)
-}
-serverActionAllowedOrigins.push('*.selfhost.imbue.com')
-
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Emit a self-contained server bundle so the runtime image is small and
@@ -46,13 +29,21 @@ const nextConfig = {
   output: 'standalone',
   images: {
     remotePatterns,
-    // The auth-proxy serves images over the same origin; allow the app to
-    // optimize local uploads without an external loader.
-    unoptimized: false,
   },
+  // Server Actions origin handling:
+  //
+  // Next rejects a forwarded Server Action whose `Origin` host does not match
+  // the `x-forwarded-host`/`host` header, unless the origin is in an
+  // `allowedOrigins` list. `allowedOrigins` is baked at BUILD time, but the
+  // zone domain is only known at runtime and varies per deployment, so we do
+  // NOT try to bake it in. Instead the auth-proxy forwards the browser's real
+  // `Origin` unchanged and rewrites `Host`/`X-Forwarded-Host` to that same
+  // external host, so legitimate same-origin mutations pass Next's check
+  // naturally and cross-site requests are still rejected. Only localhost is
+  // listed, for local `next dev`/`next start` outside the container.
   experimental: {
     serverActions: {
-      allowedOrigins: serverActionAllowedOrigins,
+      allowedOrigins: ['localhost:3000'],
     },
   },
 }

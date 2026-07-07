@@ -16,15 +16,19 @@ to seed -- the OpenHost SSO story here is simply:
 
 This proxy never mints cookies and never touches disk. Its jobs are:
 
-  1. Serve `/_healthz` with a static 200 so OpenHost's health check passes
-     during (and after) cold start.
+  1. Serve `/_healthz` with a static 200 (once the proxy is up) so
+     OpenHost's health check has a cheap endpoint that does not depend on
+     Next.js or Postgres being ready. Note the proxy is started last, after
+     Postgres init and migrations, so nothing answers during the earlier
+     boot phases — the health check only starts passing once the whole
+     stack is up.
   2. Rewrite the upstream `Host` header from `X-Forwarded-Host` so Next.js
-     generates correct absolute URLs and its Server Action CSRF check sees a
-     consistent host.
-  3. Keep the `Origin` header and `X-Forwarded-Host` consistent so Next.js
-     Server Action mutations are accepted (see next.config.mjs for the
-     matching allow-list rationale).
-  4. Force `X-Forwarded-Proto: https` so Next.js treats the connection as
+     generates correct absolute URLs and its Server Action CSRF check sees
+     the real external host. The client's `Origin` header is forwarded
+     unchanged (NOT rewritten) so Next's CSRF check keeps working: a
+     legitimate owner request already carries a same-origin Origin, and a
+     cross-site request is correctly rejected.
+  3. Force `X-Forwarded-Proto: https` so Next.js treats the connection as
      secure (required for its forwarded-host handling).
   5. Re-gate the handful of owner-only pages that unavoidably sit under a
      public prefix. The OpenHost router's `public_paths` matching is
@@ -47,6 +51,7 @@ from __future__ import annotations
 import http.client
 import os
 import sys
+import urllib.parse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -178,8 +183,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _path_only(self) -> str:
-        # Strip query string for path matching.
-        return self.path.split("?", 1)[0]
+        # Strip query string, then percent-decode.
+        #
+        # Gating decisions MUST be made on the decoded path, because Next.js
+        # (page routing) and tRPC (which calls decodeURIComponent on the path
+        # before splitting a batch on ',') both act on the decoded form. If we
+        # matched the raw encoded path, an anonymous visitor could bypass the
+        # owner-only gate with e.g. `/api/trpc/groups%2Ecreate` or
+        # `/groups/cr%65ate` or a `%2C`-joined batch. We decode once, which
+        # mirrors the single decode those frameworks perform.
+        raw = self.path.split("?", 1)[0]
+        return urllib.parse.unquote(raw)
 
     def _is_owner(self) -> bool:
         return (self.headers.get(OWNER_HEADER, "").lower() == "true")
@@ -249,25 +263,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if lk == "host":
                 # Rewrite below.
                 continue
-            if lk == "origin":
-                # Rewrite below to stay consistent with the forwarded host.
-                continue
             if lk == "x-forwarded-proto":
+                # Force to https below.
                 continue
+            # NOTE: the client's `Origin` header is forwarded UNCHANGED. We
+            # deliberately do NOT rewrite it: Next.js's Server Action CSRF
+            # check compares the Origin host to X-Forwarded-Host/Host, and a
+            # legitimate same-origin request from the owner's browser already
+            # carries `Origin: https://<forwarded_host>`. Rewriting Origin to
+            # always equal the forwarded host would forge same-origin on
+            # genuinely cross-site requests and defeat that CSRF protection.
             out.append((key, value))
             seen_lower.add(lk)
 
         if forwarded_host:
-            # Next.js compares Origin host to X-Forwarded-Host/Host for its
-            # Server Action CSRF check. Force all three to agree.
+            # Rewrite Host to the externally-visible host so Next.js builds
+            # correct absolute URLs and its CSRF check sees the real host.
             out.append(("Host", forwarded_host))
             if "x-forwarded-host" not in seen_lower:
                 out.append(("X-Forwarded-Host", forwarded_host))
-            # Only send an Origin on requests that originally had one
-            # (i.e. actual browser cross-fetches / actions). Preserving the
-            # scheme+host keeps it same-origin from Next's perspective.
-            if self.headers.get("Origin") is not None:
-                out.append(("Origin", f"https://{forwarded_host}"))
 
         out.append(("X-Forwarded-Proto", "https"))
         return out, forwarded_host

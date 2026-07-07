@@ -11,7 +11,7 @@
     // },
 
     // Use 'postCreateCommand' to run commands after the container is created.
-    "postCreateCommand": "cp container.env.example .env && npm install",
+    "postCreateCommand": "cp .env.example .env && npm install",
     "postAttachCommand": {
     	"npm": "npm run dev"
     },
