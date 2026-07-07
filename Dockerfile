@@ -65,13 +65,19 @@ COPY --from=build /usr/app/.next/standalone ./
 COPY --from=build /usr/app/.next/static ./.next/static
 COPY --from=build /usr/app/public ./public
 
-# Prisma: the generated client + the migration files + the CLI are needed at
-# runtime so start.sh can run `prisma migrate deploy` against the bundled DB.
-COPY --from=build /usr/app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=build /usr/app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=build /usr/app/node_modules/prisma ./node_modules/prisma
+# Prisma migrations at runtime.
+#
+# The Next.js standalone bundle ships a curated, minimal node_modules that is
+# enough to *run* the server (it includes the generated @prisma/client), but
+# NOT enough to run the Prisma *CLI* (`prisma migrate deploy`), whose deep
+# dependency tree (@prisma/config -> effect, c12, ...) is not traced by
+# Next's standalone tracer. Rather than cherry-pick that fragile tree, we
+# copy the full build-stage node_modules into a dedicated location used
+# ONLY by start.sh to apply migrations before the server starts.
+COPY --from=build /usr/app/node_modules ./migrate/node_modules
+COPY --from=build /usr/app/prisma ./migrate/prisma
+COPY --from=build /usr/app/package.json ./migrate/package.json
 COPY --from=build /usr/app/prisma ./prisma
-COPY --from=build /usr/app/package.json ./package.json
 
 # OpenHost integration layer.
 COPY openhost/auth_proxy.py /usr/app/openhost/auth_proxy.py

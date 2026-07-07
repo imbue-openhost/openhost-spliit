@@ -95,8 +95,9 @@ export POSTGRES_PRISMA_URL="postgresql://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${P
 export POSTGRES_URL_NON_POOLING="${POSTGRES_PRISMA_URL}"
 
 # --- 2. Prisma migrations --------------------------------------------------
+# Run the Prisma CLI from the dedicated full-node_modules dir (see Dockerfile).
 log "Applying Prisma migrations"
-node node_modules/prisma/build/index.js migrate deploy
+( cd /usr/app/migrate && node node_modules/prisma/build/index.js migrate deploy )
 
 # --- 3. Next.js standalone -------------------------------------------------
 export PORT="${APP_PORT}"
