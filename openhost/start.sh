@@ -25,17 +25,13 @@ PGSOCKET_DIR="/tmp/pg-spliit"
 PG_PORT=5432
 PG_USER="spliit"
 PG_DB="spliit"
-# Bundled DB is loopback-only, so the password never leaves the container.
-# It is derived from the OpenHost app token if present, else a fixed local
-# value (the DB is not reachable from outside the container in any case).
 # The bundled DB is loopback-only (never reachable from outside the
 # container), so its password is not a meaningful external secret. We
-# generate a fresh RANDOM ALPHANUMERIC password on every boot and (re)apply
-# it to the role below. Alphanumeric-only guarantees it is safe to embed in
-# both the SQL role definition and the Prisma connection URL without any
-# quoting/escaping — avoiding the SQL-syntax / URL-parse breakage (and
-# crash-loops) that a password with special characters would cause. Nothing
-# is persisted to disk.
+# generate a fresh RANDOM HEX password on every boot and (re)apply it to the
+# role below. Hex (0-9a-f) is guaranteed safe to embed in both the SQL role
+# definition and the Prisma connection URL without any quoting/escaping —
+# avoiding the SQL-syntax / URL-parse breakage (and crash-loops) that a
+# password with special characters would cause. Nothing is persisted to disk.
 PG_PASSWORD="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
 APP_PORT=3000
@@ -43,8 +39,8 @@ PROXY_PORT=8080
 
 mkdir -p "${DATA_DIR}" "${PGSOCKET_DIR}"
 
-# postgres refuses to run as root; use the alpine 'postgres' user.
-PG_UID="$(id -u postgres)"
+# postgres refuses to run as root; everything DB-related runs as the alpine
+# 'postgres' user via su-exec, and the persistent dirs must be owned by it.
 chown -R postgres:postgres "${DATA_DIR}" "${PGSOCKET_DIR}"
 
 # --- 1. PostgreSQL ---------------------------------------------------------

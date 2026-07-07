@@ -39,20 +39,19 @@ RUN npm run build \
 FROM node:22-alpine AS runtime
 
 # System deps:
-#   postgresql* : bundled database
-#   python3     : auth-proxy sidecar
-#   openssl     : prisma engine runtime dep
-#   su-exec     : drop privileges (alpine's gosu equivalent)
-#   tini        : reap zombies for the long-lived supervisor
+#   postgresql16 : bundled database (server + client + pg_ctl/pg_isready)
+#   python3      : auth-proxy sidecar
+#   openssl      : prisma engine runtime dep
+#   su-exec      : drop privileges to the postgres user (alpine's gosu)
+#   tini         : reap zombies for the long-lived supervisor
+#   bash         : start.sh uses bashisms (wait -n, arrays)
 RUN apk add --no-cache \
         postgresql16 \
-        postgresql16-contrib \
         python3 \
         openssl \
         su-exec \
         tini \
-        bash \
-        curl
+        bash
 
 WORKDIR /usr/app
 

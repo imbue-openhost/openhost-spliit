@@ -30,7 +30,7 @@ This proxy never mints cookies and never touches disk. Its jobs are:
      cross-site request is correctly rejected.
   3. Force `X-Forwarded-Proto: https` so Next.js treats the connection as
      secure (required for its forwarded-host handling).
-  5. Re-gate the handful of owner-only pages that unavoidably sit under a
+  4. Re-gate the handful of owner-only pages that unavoidably sit under a
      public prefix. The OpenHost router's `public_paths` matching is
      prefix-based, so exposing `/groups/` (needed for shared group links
      `/groups/<id>...`) also exposes the fixed `/groups/create` page and the
@@ -52,7 +52,6 @@ import http.client
 import os
 import sys
 import urllib.parse
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "127.0.0.1")
