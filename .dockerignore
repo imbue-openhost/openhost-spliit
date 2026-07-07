@@ -1,0 +1,29 @@
+# Keep the Docker build context small and deterministic. Without this,
+# `COPY . .` would drag in the host's node_modules (potentially glibc-built
+# native binaries incompatible with the alpine/musl build stage, plus a stale
+# generated Prisma client), the previous .next build, and the .git history —
+# all of which bloat layers, bust the build cache, and can silently overwrite
+# the freshly `npm ci`-installed tree.
+node_modules
+.next
+.git
+.gitignore
+.dockerignore
+
+# Local env / editor / OS cruft
+.env
+.env.*
+!scripts/build.env
+.vscode
+.idea
+.devcontainer
+.DS_Store
+
+# Tests / coverage / docs that the runtime image never needs
+coverage
+*.log
+npm-debug.log*
+
+# Python sidecar bytecode
+__pycache__
+*.pyc

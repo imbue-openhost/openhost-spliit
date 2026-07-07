@@ -22,10 +22,12 @@ PGSOCKET_DIR="/tmp/pg-spliit"
 PG_PORT=5432
 PG_USER="spliit"
 PG_DB="spliit"
-# Bundled DB is loopback-only, so the password never leaves the container.
-# It is derived from the OpenHost app token if present, else a fixed local
-# value (the DB is not reachable from outside the container in any case).
-PG_PASSWORD="${OPENHOST_APP_TOKEN:-spliit_local_only}"
+# Where the bundled DB's generated password is stored. The DB is loopback-only
+# (listen_addresses=127.0.0.1, no port published), so this password is never
+# reachable from outside the container. We generate a random one on first boot
+# and persist it in the DB data dir alongside the cluster it protects — it is
+# only meaningful together with that on-disk cluster.
+PG_PASSWORD_FILE="${PGDATA}/.spliit_db_password"
 
 APP_PORT=3000
 PROXY_PORT=8080
@@ -33,8 +35,20 @@ PROXY_PORT=8080
 mkdir -p "${DATA_DIR}" "${PGSOCKET_DIR}"
 
 # postgres refuses to run as root; use the alpine 'postgres' user.
-PG_UID="$(id -u postgres)"
 chown -R postgres:postgres "${DATA_DIR}" "${PGSOCKET_DIR}"
+
+# --- DB password (random, generated once, persisted with the cluster) ------
+provision_db_password() {
+  if [ -s "${PG_PASSWORD_FILE}" ]; then
+    PG_PASSWORD="$(cat "${PG_PASSWORD_FILE}")"
+    return
+  fi
+  # 32 hex chars: url-safe and quote-safe, so no SQL/URL escaping surprises.
+  PG_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  ( umask 077; printf '%s' "${PG_PASSWORD}" > "${PG_PASSWORD_FILE}" )
+  chown postgres:postgres "${PG_PASSWORD_FILE}"
+  chmod 0600 "${PG_PASSWORD_FILE}"
+}
 
 # --- 1. PostgreSQL ---------------------------------------------------------
 init_db() {
@@ -52,32 +66,41 @@ init_db() {
 }
 
 start_db() {
+  # Run the postgres server as a direct background child (not via pg_ctl's
+  # detached daemon) so it is a real shell child that `wait -n` supervises:
+  # if the DB dies, the whole container exits and OpenHost restarts it.
   log "Starting PostgreSQL"
-  su-exec postgres pg_ctl -D "${PGDATA}" \
-    -o "-c unix_socket_directories='${PGSOCKET_DIR}'" \
-    -w -t 60 start
+  su-exec postgres postgres -D "${PGDATA}" \
+    -c unix_socket_directories="${PGSOCKET_DIR}" &
+  PG_PID=$!
 }
 
-bootstrap_role_and_db() {
-  # Wait for readiness.
-  for i in $(seq 1 30); do
+wait_for_db() {
+  # Wait for readiness; fail loudly (and exit) if the DB never comes up so
+  # OpenHost restarts the container instead of us proceeding into confusing
+  # psql connection errors.
+  for _ in $(seq 1 60); do
     if su-exec postgres pg_isready -h "${PGSOCKET_DIR}" -p "${PG_PORT}" >/dev/null 2>&1; then
-      break
+      return 0
     fi
     sleep 1
   done
+  log "FATAL: PostgreSQL did not become ready within 60s"
+  exit 1
+}
 
-  # Create role + database idempotently.
-  su-exec postgres psql -h "${PGSOCKET_DIR}" -p "${PG_PORT}" -d postgres -v ON_ERROR_STOP=1 <<SQL
-DO \$\$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${PG_USER}') THEN
-    CREATE ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASSWORD}';
-  ELSE
-    ALTER ROLE ${PG_USER} WITH PASSWORD '${PG_PASSWORD}';
-  END IF;
-END
-\$\$;
+bootstrap_role_and_db() {
+  # Create role + database idempotently. The password is passed via a psql
+  # variable and quoted with :'name', so no value can break out of the SQL
+  # string; the generated password is hex-only anyway.
+  su-exec postgres psql -h "${PGSOCKET_DIR}" -p "${PG_PORT}" -d postgres \
+    -v ON_ERROR_STOP=1 -v pw="${PG_PASSWORD}" -v role="${PG_USER}" <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'role', :'pw')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'role')
+\gexec
+SELECT format('ALTER ROLE %I WITH PASSWORD %L', :'role', :'pw')
+WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = :'role')
+\gexec
 SQL
   if ! su-exec postgres psql -h "${PGSOCKET_DIR}" -p "${PG_PORT}" -d postgres -tAc \
        "SELECT 1 FROM pg_database WHERE datname = '${PG_DB}'" | grep -q 1; then
@@ -86,7 +109,9 @@ SQL
 }
 
 init_db
+provision_db_password
 start_db
+wait_for_db
 bootstrap_role_and_db
 
 # Connection string for Prisma + the app. Loopback TCP so both the CLI and
@@ -126,12 +151,14 @@ log "All services started (next=${NEXT_PID} proxy=${PROXY_PID})"
 terminate() {
   log "Shutting down"
   kill "${NEXT_PID}" "${PROXY_PID}" 2>/dev/null || true
-  su-exec postgres pg_ctl -D "${PGDATA}" -m fast -w stop 2>/dev/null || true
+  # Ask postgres to shut down cleanly (fast mode) and reap it.
+  kill -INT "${PG_PID}" 2>/dev/null || true
+  wait "${PG_PID}" 2>/dev/null || true
   exit 0
 }
 trap terminate TERM INT
 
-# Exit as soon as any critical child dies.
-wait -n "${NEXT_PID}" "${PROXY_PID}"
+# Exit as soon as ANY critical child dies (Postgres, Next.js, or the proxy).
+wait -n "${PG_PID}" "${NEXT_PID}" "${PROXY_PID}"
 log "A supervised process exited; tearing down"
 terminate

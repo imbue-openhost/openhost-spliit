@@ -14,23 +14,36 @@ to seed -- the OpenHost SSO story here is simply:
     not have an OpenHost account -- exactly matching upstream Spliit's
     link-sharing model.
 
-This proxy therefore does NOT mint cookies or gate requests itself. Its jobs
-are purely transport-level and required for Next.js to work correctly behind
-the OpenHost router:
+This proxy never mints cookies and never persists anything to disk. It has
+two responsibilities:
 
-  1. Serve `/_healthz` with a static 200 so OpenHost's health check passes
-     during (and after) cold start.
-  2. Rewrite the upstream `Host` header from `X-Forwarded-Host` so Next.js
-     generates correct absolute URLs and its Server Action CSRF check sees a
-     consistent host.
-  3. Keep the `Origin` header and `X-Forwarded-Host` consistent so Next.js
-     Server Action mutations are accepted (see next.config.mjs for the
-     matching allow-list rationale).
-  4. Force `X-Forwarded-Proto: https` so Next.js treats the connection as
-     secure (required for its forwarded-host handling).
+  A. Transport-level fixes required for Next.js to work behind the OpenHost
+     router:
+       1. Serve `/_healthz` with a static 200 so OpenHost's health check
+          passes during (and after) cold start.
+       2. Rewrite the upstream `Host` header from `X-Forwarded-Host` so
+          Next.js generates correct absolute URLs and its Server Action CSRF
+          check sees a consistent host.
+       3. Keep the `Origin` header and `X-Forwarded-Host` consistent so
+          Next.js Server Action mutations are accepted (see next.config.mjs
+          for the matching allow-list rationale).
+       4. Force `X-Forwarded-Proto: https` so Next.js treats the connection
+          as secure (required for its forwarded-host handling).
 
-It is a thin, streaming HTTP/1.1 proxy -- no buffering of large bodies, no
-persistence, nothing written to disk.
+  B. Owner-only gating for the handful of privileged operations that sit
+     UNDER a public prefix in openhost.toml and so cannot be gated by the
+     router alone. The router's public-path matching is prefix-based, so
+     "/groups/" (needed for shared group links) also matches the
+     "/groups/create" page, and "/api/" (needed by the group pages' tRPC
+     data calls) also matches the group-creation mutation and the S3 upload
+     handler. The router stamps `X-OpenHost-Is-Owner: true` on requests from
+     the zone_auth'd owner; when that header is absent on one of these
+     privileged paths we refuse the request. Everything else stays public so
+     link-shared groups keep working for non-owners.
+
+It buffers each request/response body in memory before forwarding (Spliit's
+payloads are small JSON/HTML; there are no large uploads unless the operator
+enables S3, and next-s3-upload uploads go directly to S3, not through here).
 """
 
 from __future__ import annotations
@@ -55,16 +68,33 @@ OWNER_HEADER = "X-OpenHost-Is-Owner"
 # Owner-only paths that must be gated even though they sit *under* a public
 # prefix in openhost.toml. The router's public-path matching is
 # prefix-based, so "/groups/" (needed for shared group links like
-# /groups/<id>) unavoidably also matches the fixed "/groups/create" page.
-# We re-gate those fixed sub-paths here: an anonymous visitor gets bounced
-# to the OpenHost login instead of the create UI. Shared group links
-# (/groups/<nanoid>...) stay public.
+# /groups/<id>) unavoidably also matches the fixed "/groups/create" page,
+# and "/api/" (needed by the group pages' tRPC data calls) unavoidably also
+# matches the privileged group-creation mutation and the S3 upload handler.
+# We re-gate those here: an anonymous visitor gets bounced to the OpenHost
+# login instead of reaching them. Shared group links (/groups/<nanoid>...)
+# and the per-group read/write tRPC calls they rely on stay public.
 #
-# Matching is exact or exact-prefix ("/groups/create" and
+# Path matching is exact or exact-prefix ("/groups/create" and
 # "/groups/create/..."), so a group whose id happened to start with
 # "create" is not affected (nanoid ids never equal these fixed segments).
 OWNER_ONLY_EXACT = {"/groups", "/groups/create"}
-OWNER_ONLY_PREFIXES = ("/groups/create/",)
+OWNER_ONLY_PREFIXES = (
+    "/groups/create/",
+    # next-s3-upload's presign handler: writes to the owner's S3 bucket, so
+    # only the owner may reach it (harmless when S3 is disabled, but gating
+    # it closes the abuse vector when an operator turns S3 on).
+    "/api/s3-upload",
+)
+
+# tRPC mutations that must be owner-only. Spliit's tRPC endpoint lives under
+# the (necessarily public) "/api/trpc/" prefix; the procedure name is encoded
+# in the path segment after it, comma-joined when the client batches several
+# calls into one request (httpBatchLink). We block the request if any of
+# these privileged procedures appears in that segment. Everything else under
+# /api/trpc/ (reads + per-group writes on shared groups) stays public.
+TRPC_PREFIX = "/api/trpc/"
+OWNER_ONLY_TRPC_PROCEDURES = ("groups.create",)
 
 # Hop-by-hop headers must not be forwarded (RFC 7230 6.1).
 HOP_BY_HOP = {
@@ -85,11 +115,12 @@ def _log(msg: str) -> None:
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    # Use HTTP/1.0 semantics (connection closed after each response) so we
-    # never have to reconcile the upstream framing (chunked vs
-    # content-length) with keep-alive. The OpenHost router in front of us
-    # pools its own upstream connections, so per-request connections here
-    # are not a throughput concern.
+    # Speak HTTP/1.1 but close the connection after every response (each
+    # handler adds `Connection: close` + sets close_connection). This gives
+    # us HTTP/1.1 request parsing without having to reconcile upstream
+    # framing (chunked vs content-length) with keep-alive. The OpenHost
+    # router in front of us pools its own upstream connections, so
+    # per-request connections here are not a throughput concern.
     protocol_version = "HTTP/1.1"
 
     # Keep logging quiet; the container captures stderr from _log only.
@@ -124,7 +155,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._serve_health()
             return
         if self._is_owner_only_path() and not self._is_owner():
-            self._bounce_to_login()
+            # API/tRPC calls get a machine-readable 403; page navigations get
+            # bounced to the OpenHost login so the browser lands somewhere
+            # sensible.
+            if self._path_only().startswith("/api/"):
+                self._deny_api()
+            else:
+                self._bounce_to_login()
             return
         try:
             self._proxy()
@@ -161,7 +198,30 @@ class ProxyHandler(BaseHTTPRequestHandler):
         p = self._path_only()
         if p in OWNER_ONLY_EXACT:
             return True
-        return any(p.startswith(prefix) for prefix in OWNER_ONLY_PREFIXES)
+        if any(p.startswith(prefix) for prefix in OWNER_ONLY_PREFIXES):
+            return True
+        # Privileged tRPC mutations (e.g. groups.create) live under the public
+        # /api/trpc/ prefix; the procedure name(s) are the path segment right
+        # after it (comma-joined for batched calls).
+        if p.startswith(TRPC_PREFIX):
+            proc_segment = p[len(TRPC_PREFIX):]
+            called = set(proc_segment.split(","))
+            if called.intersection(OWNER_ONLY_TRPC_PROCEDURES):
+                return True
+        return False
+
+    def _deny_api(self) -> None:
+        """Reject an anonymous visitor's privileged API/tRPC call with 403."""
+        body = b'{"error":{"message":"Forbidden: owner only"}}'
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _bounce_to_login(self) -> None:
         """Redirect an anonymous visitor on an owner-only path to OpenHost
