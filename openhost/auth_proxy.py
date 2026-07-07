@@ -161,7 +161,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._serve_health()
             return
         if self._is_owner_only_path() and not self._is_owner():
-            if self._path_only().startswith(TRPC_PREFIX):
+            # API endpoints (anything under /api/) get a machine-readable 403;
+            # owner-only *pages* get a redirect to the OpenHost login so a
+            # human visitor lands somewhere sensible.
+            if self._path_only().startswith("/api/"):
                 self._forbidden_json()
             else:
                 self._bounce_to_login()
