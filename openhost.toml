@@ -1,0 +1,59 @@
+[app]
+name = "spliit"
+version = "0.1.0"
+description = "Spliit — a minimalist shared-expense / bill-splitting app, packaged for OpenHost with owner SSO and public group-link sharing."
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+health_check = "/_healthz"
+
+# Paths the OpenHost router lets through WITHOUT zone_auth.
+#
+# Spliit's sharing model: a group is reached purely by its unguessable
+# nanoid URL (/groups/<id>...). To let the owner share a group with friends
+# who do not have an OpenHost account, we expose the group pages plus the
+# API and static assets those pages need. The landing page ("/"), the
+# recent-groups list, and /groups/create are NOT public, so only the
+# zone_auth'd owner can create groups or see the app shell.
+#
+# IMPORTANT: never list "/" here — the router treats it as a catch-all
+# prefix that would make the entire app public and break owner SSO.
+#
+# These MUST stay conceptually in sync with the app's routes; the auth-proxy
+# itself does not gate (the router does), it only fixes forwarding headers.
+public_paths = [
+    "/_healthz",
+    # Shared group pages (view / edit / add expenses / balances / stats /
+    # activity / info / export) all live under /groups/<id>...
+    "/groups/",
+    # tRPC + API routes the group pages call (data reads + mutations,
+    # s3 uploads when enabled, health).
+    "/api/",
+    # Next.js runtime assets + optimized images.
+    "/_next/",
+    # App icons / manifest / static files served from /public.
+    "/favicon.ico",
+    "/icon.svg",
+    "/apple-icon.png",
+    "/manifest.webmanifest",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/logo/",
+    "/logo.svg",
+    "/logo-with-text.png",
+    "/banner.png",
+    "/android-chrome-192x192.png",
+    "/android-chrome-512x512.png",
+]
+
+[resources]
+memory_mb = 1024
+cpu_millicores = 1000
+
+[data]
+app_data = true
+app_temp_data = true
