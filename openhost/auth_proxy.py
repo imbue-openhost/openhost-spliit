@@ -45,6 +45,26 @@ UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "127.0.0.1")
 UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "3000"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
 HEALTH_PATH = "/_healthz"
+ZONE_DOMAIN = os.environ.get("OPENHOST_ZONE_DOMAIN", "")
+
+# The OpenHost router stamps this header on every request from the
+# zone_auth'd owner (even on public paths). Absence of it => anonymous
+# visitor who reached us via a public_paths entry.
+OWNER_HEADER = "X-OpenHost-Is-Owner"
+
+# Owner-only paths that must be gated even though they sit *under* a public
+# prefix in openhost.toml. The router's public-path matching is
+# prefix-based, so "/groups/" (needed for shared group links like
+# /groups/<id>) unavoidably also matches the fixed "/groups/create" page.
+# We re-gate those fixed sub-paths here: an anonymous visitor gets bounced
+# to the OpenHost login instead of the create UI. Shared group links
+# (/groups/<nanoid>...) stay public.
+#
+# Matching is exact or exact-prefix ("/groups/create" and
+# "/groups/create/..."), so a group whose id happened to start with
+# "create" is not affected (nanoid ids never equal these fixed segments).
+OWNER_ONLY_EXACT = {"/groups", "/groups/create"}
+OWNER_ONLY_PREFIXES = ("/groups/create/",)
 
 # Hop-by-hop headers must not be forwarded (RFC 7230 6.1).
 HOP_BY_HOP = {
@@ -103,6 +123,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self.path == HEALTH_PATH:
             self._serve_health()
             return
+        if self._is_owner_only_path() and not self._is_owner():
+            self._bounce_to_login()
+            return
         try:
             self._proxy()
         except (BrokenPipeError, ConnectionResetError):
@@ -120,6 +143,42 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _path_only(self) -> str:
+        # Strip query string for path matching.
+        return self.path.split("?", 1)[0]
+
+    def _is_owner(self) -> bool:
+        return (self.headers.get(OWNER_HEADER, "").lower() == "true")
+
+    def _is_owner_only_path(self) -> bool:
+        p = self._path_only()
+        if p in OWNER_ONLY_EXACT:
+            return True
+        return any(p.startswith(prefix) for prefix in OWNER_ONLY_PREFIXES)
+
+    def _bounce_to_login(self) -> None:
+        """Redirect an anonymous visitor on an owner-only path to OpenHost
+        login. Uses the zone login the router itself would use."""
+        forwarded_host = self.headers.get("X-Forwarded-Host") or self.headers.get(
+            "Host", ""
+        )
+        if ZONE_DOMAIN:
+            target = f"https://{ZONE_DOMAIN}/login"
+        elif forwarded_host:
+            target = f"https://{forwarded_host}/login"
+        else:
+            target = "/login"
+        body = b""
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.close_connection = True

@@ -116,6 +116,7 @@ NEXT_PID=$!
 # --- 4. Auth-proxy ---------------------------------------------------------
 log "Starting auth-proxy on 0.0.0.0:${PROXY_PORT}"
 UPSTREAM_HOST=127.0.0.1 UPSTREAM_PORT="${APP_PORT}" LISTEN_PORT="${PROXY_PORT}" \
+  OPENHOST_ZONE_DOMAIN="${OPENHOST_ZONE_DOMAIN:-}" \
   python3 /usr/app/openhost/auth_proxy.py &
 PROXY_PID=$!
 
