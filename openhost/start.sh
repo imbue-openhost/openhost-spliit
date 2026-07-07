@@ -35,7 +35,9 @@ PG_DB="spliit"
 PG_PASSWORD="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
 APP_PORT=3000
-PROXY_PORT=8080
+# The OpenHost-routed port (see openhost.toml). Overridable only to ease
+# local testing; production always uses 8080.
+PROXY_PORT="${OPENHOST_PROXY_PORT:-8080}"
 
 mkdir -p "${DATA_DIR}" "${PGSOCKET_DIR}"
 
