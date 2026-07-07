@@ -28,14 +28,16 @@ if (process.env.S3_UPLOAD_ENDPOINT) {
  * Next.js rejects a forwarded Server Action request unless the `Origin`
  * header host matches the `x-forwarded-host`/`host` header, OR the origin
  * is present in this allow-list. Behind the OpenHost router the auth-proxy
- * (openhost/auth_proxy.py) rewrites `Origin` to `https://<x-forwarded-host>`
- * on every request that carries an Origin, so Server Action requests are
- * always same-origin from Next's perspective and pass WITHOUT needing an
- * entry here. We therefore keep this list minimal — only `localhost:3000`
- * for `npm run dev` — and deliberately do NOT add a
- * `*.selfhost.imbue.com` wildcard, which would make every other OpenHost
- * tenant's zone a valid Server Action origin against this app and defeat
- * Next's cross-origin CSRF protection.
+ * (openhost/auth_proxy.py) passes the browser's `Origin` header through
+ * UNCHANGED and rewrites `Host`/`X-Forwarded-Host` to the public host, so a
+ * real browser navigation — whose Origin already equals that public host —
+ * is same-origin from Next's perspective and passes WITHOUT needing an entry
+ * here, while a genuine cross-site request keeps its foreign Origin and is
+ * rejected. We therefore keep this list minimal — only `localhost:3000` for
+ * `npm run dev` — and deliberately do NOT add a `*.selfhost.imbue.com`
+ * wildcard, which would make every other OpenHost tenant's zone a valid
+ * Server Action origin against this app and defeat Next's cross-origin CSRF
+ * protection.
  */
 const serverActionAllowedOrigins = ['localhost:3000']
 
