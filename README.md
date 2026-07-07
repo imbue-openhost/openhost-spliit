@@ -57,16 +57,18 @@ the OpenHost router (via `public_paths`); the proxy's jobs are:
    accepted (Next rejects forwarded actions whose `Origin` host does not
    match the forwarded host).
 3. Force `X-Forwarded-Proto: https`.
-4. Re-gate the few owner-only paths that unavoidably sit under a public
-   prefix. Because the router's `public_paths` matching is prefix-based,
-   exposing `/groups/` (needed for shared group links) also exposes the
-   fixed `/groups/create` page, the `/groups` recent-list, and the tRPC
-   `groups.create` mutation under `/api/`. For those specific paths the
-   proxy checks the router-stamped `X-OpenHost-Is-Owner` header and either
-   bounces anonymous visitors to the OpenHost login (pages) or returns a
-   403 (the create API). Everything else a shared group needs — reading a
-   group, adding/editing/deleting expenses, balances, stats, export — stays
-   public so anyone with the link can use the group fully.
+ 4. Re-gate the few owner-only paths that unavoidably sit under a public
+    prefix. Because the router's `public_paths` matching is prefix-based,
+    exposing `/groups/` (needed for shared group links) also exposes the
+    fixed `/groups/create` page and the `/groups` recent-list, and exposing
+    `/api/` also exposes the tRPC `groups.create` mutation and the
+    `/api/s3-upload` presign handler (which mints presigned uploads to the
+    owner's S3 bucket). For those specific paths the proxy checks the
+    router-stamped `X-OpenHost-Is-Owner` header and either bounces anonymous
+    visitors to the OpenHost login (pages) or returns a 403 (the API
+    endpoints). Everything else a shared group needs — reading a group,
+    adding/editing/deleting expenses, balances, stats, export — stays public
+    so anyone with the link can use the group fully.
 
 The proxy reads each request and upstream response body fully into memory and
 re-frames the response with an explicit `Content-Length`, closing the

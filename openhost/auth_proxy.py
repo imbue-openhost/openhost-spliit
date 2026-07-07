@@ -77,7 +77,16 @@ OWNER_HEADER = "X-OpenHost-Is-Owner"
 # "/groups/create/..."), so a group whose id happened to start with
 # "create" is not affected (nanoid ids never equal these fixed segments).
 OWNER_ONLY_EXACT = {"/groups", "/groups/create"}
-OWNER_ONLY_PREFIXES = ("/groups/create/",)
+OWNER_ONLY_PREFIXES = (
+    "/groups/create/",
+    # next-s3-upload's presign handler (src/app/api/s3-upload/route.ts) also
+    # sits under the public "/api/" prefix. It mints presigned PUTs to the
+    # owner-configured S3 bucket, so an anonymous visitor could upload
+    # arbitrary objects to it when S3 is enabled. Gate it to the owner. It is
+    # harmless when S3 is disabled (the route errors), but gating closes the
+    # abuse vector the moment an operator turns S3 on.
+    "/api/s3-upload",
+)
 
 # Creating a *new* group is an owner-only action. The create UI page is
 # gated above, but the mutation it fronts (tRPC `groups.create`) is reachable
