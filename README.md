@@ -59,10 +59,12 @@ server with two jobs:
 **Transport-level fixes** required for Next.js behind a reverse proxy:
 
 1. Serve `/_healthz` with a static 200 for the OpenHost health check.
-2. Rewrite the upstream `Host` header from `X-Forwarded-Host` and rewrite
-   `Origin` to match, so Next.js Server Action mutations are accepted (Next
-   rejects forwarded actions whose `Origin` host does not match the
-   forwarded host). This is why `next.config.mjs` needs no wildcard origin
+2. Rewrite the upstream `Host` header from `X-Forwarded-Host`. The browser's
+   `Origin` header is passed through unchanged: for a real navigation it
+   already equals the public app host (so Next.js Server Actions pass its
+   CSRF check), and a genuine cross-site request keeps its foreign origin
+   and is rejected. The proxy does NOT forge `Origin`, so Next's CSRF
+   protection stays intact and `next.config.mjs` needs no wildcard origin
    allow-list.
 3. Force `X-Forwarded-Proto: https`.
 
