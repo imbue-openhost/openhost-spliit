@@ -120,10 +120,15 @@ export PORT="${APP_PORT}"
 export HOSTNAME="127.0.0.1"
 export NODE_ENV=production
 export NEXT_TELEMETRY_DISABLED=1
-# The public base URL used for absolute links / metadata.
-if [ -n "${OPENHOST_ZONE_DOMAIN:-}" ]; then
-  export NEXT_PUBLIC_BASE_URL="https://${OPENHOST_APP_NAME:-spliit}.${OPENHOST_ZONE_DOMAIN}"
-fi
+# NOTE: we intentionally do NOT try to set NEXT_PUBLIC_BASE_URL here. Spliit's
+# only consumers of it are the static metadata routes (sitemap.ts / robots.ts),
+# which Next prerenders at BUILD time — a runtime export cannot change them.
+# The zone domain is not known at build time and varies per deployment, so
+# sitemap.xml/robots.txt fall back to the build default. That is cosmetic
+# (SEO metadata) and irrelevant for an owner-gated OpenHost app; the app's
+# own navigation and share links are all relative, so they work correctly
+# regardless. Absolute links elsewhere are derived from the request's
+# Host header (which the auth-proxy sets from X-Forwarded-Host).
 
 log "Starting Next.js on 127.0.0.1:${APP_PORT}"
 node server.js &

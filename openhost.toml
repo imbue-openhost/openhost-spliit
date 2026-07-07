@@ -41,7 +41,10 @@ public_paths = [
     "/api/",
     # Next.js runtime assets + optimized images.
     "/_next/",
-    # App icons / manifest / static files served from /public.
+    # App icons / manifest / robots / sitemap. Some are app-router generated
+    # (favicon.ico, icon.svg, apple-icon.png from src/app; manifest.webmanifest,
+    # robots.txt, sitemap.xml from src/app/*.ts), the rest are static files in
+    # /public (logo/banner/android-chrome). All are read-only public assets.
     "/favicon.ico",
     "/icon.svg",
     "/apple-icon.png",
