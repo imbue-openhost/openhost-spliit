@@ -14,9 +14,7 @@ to seed -- the OpenHost SSO story here is simply:
     not have an OpenHost account -- exactly matching upstream Spliit's
     link-sharing model.
 
-This proxy therefore does NOT mint cookies or gate requests itself. Its jobs
-are purely transport-level and required for Next.js to work correctly behind
-the OpenHost router:
+This proxy never mints cookies and never touches disk. Its jobs are:
 
   1. Serve `/_healthz` with a static 200 so OpenHost's health check passes
      during (and after) cold start.
@@ -28,9 +26,20 @@ the OpenHost router:
      matching allow-list rationale).
   4. Force `X-Forwarded-Proto: https` so Next.js treats the connection as
      secure (required for its forwarded-host handling).
+  5. Re-gate the handful of owner-only pages that unavoidably sit under a
+     public prefix. The OpenHost router's `public_paths` matching is
+     prefix-based, so exposing `/groups/` (needed for shared group links
+     `/groups/<id>...`) also exposes the fixed `/groups/create` page and the
+     `/groups` recent-list. For those specific paths this proxy checks the
+     router-stamped `X-OpenHost-Is-Owner` header and bounces anonymous
+     visitors to the OpenHost login. The bulk of the gating is still done by
+     the OpenHost router; this only covers the prefix-collision cases.
 
-It is a thin, streaming HTTP/1.1 proxy -- no buffering of large bodies, no
-persistence, nothing written to disk.
+Framing: the proxy fully reads each request body and each upstream response
+body into memory and re-frames the response with an explicit Content-Length,
+closing the connection after each response. This trades streaming for simple,
+correct framing behind the router (which pools its own upstream connections).
+Spliit's payloads are small (JSON group/expense data), so buffering is fine.
 """
 
 from __future__ import annotations
@@ -66,6 +75,21 @@ OWNER_HEADER = "X-OpenHost-Is-Owner"
 OWNER_ONLY_EXACT = {"/groups", "/groups/create"}
 OWNER_ONLY_PREFIXES = ("/groups/create/",)
 
+# Creating a *new* group is an owner-only action. The create UI page is
+# gated above, but the mutation it fronts (tRPC `groups.create`) is reachable
+# directly under the public `/api/` prefix, so we must gate the mutation too
+# or an anonymous internet visitor could spam group creation on the owner's
+# instance. tRPC puts the procedure name in the path
+# (`/api/trpc/groups.create`), and httpBatchLink may comma-join several
+# procedures into one path (`/api/trpc/groups.create,groups.get`), so we look
+# for the procedure name anywhere in the tRPC path segment.
+#
+# All OTHER group operations (reads, expense add/edit/delete, balances, etc.)
+# stay public so anyone with a shared group link can use the group fully --
+# matching upstream Spliit's link-sharing model.
+OWNER_ONLY_TRPC_PROCEDURES = ("groups.create",)
+TRPC_PREFIX = "/api/trpc/"
+
 # Hop-by-hop headers must not be forwarded (RFC 7230 6.1).
 HOP_BY_HOP = {
     "connection",
@@ -85,11 +109,11 @@ def _log(msg: str) -> None:
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    # Use HTTP/1.0 semantics (connection closed after each response) so we
-    # never have to reconcile the upstream framing (chunked vs
-    # content-length) with keep-alive. The OpenHost router in front of us
-    # pools its own upstream connections, so per-request connections here
-    # are not a throughput concern.
+    # Advertise HTTP/1.1 but close the connection after every response (see
+    # `Connection: close` below). This avoids having to reconcile the
+    # upstream framing (chunked vs content-length) with keep-alive. The
+    # OpenHost router in front of us pools its own upstream connections, so
+    # per-request connections here are not a throughput concern.
     protocol_version = "HTTP/1.1"
 
     # Keep logging quiet; the container captures stderr from _log only.
@@ -124,7 +148,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._serve_health()
             return
         if self._is_owner_only_path() and not self._is_owner():
-            self._bounce_to_login()
+            if self._path_only().startswith(TRPC_PREFIX):
+                self._forbidden_json()
+            else:
+                self._bounce_to_login()
             return
         try:
             self._proxy()
@@ -161,7 +188,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         p = self._path_only()
         if p in OWNER_ONLY_EXACT:
             return True
-        return any(p.startswith(prefix) for prefix in OWNER_ONLY_PREFIXES)
+        if any(p.startswith(prefix) for prefix in OWNER_ONLY_PREFIXES):
+            return True
+        # tRPC create mutation: procedure name lives in the path segment
+        # after /api/trpc/ (possibly comma-joined with other procedures).
+        if p.startswith(TRPC_PREFIX):
+            procedures = p[len(TRPC_PREFIX):].split(",")
+            if any(proc in OWNER_ONLY_TRPC_PROCEDURES for proc in procedures):
+                return True
+        return False
 
     def _bounce_to_login(self) -> None:
         """Redirect an anonymous visitor on an owner-only path to OpenHost
@@ -179,6 +214,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", target)
         self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _forbidden_json(self) -> None:
+        """Reject an anonymous owner-only API call with a 403 JSON body."""
+        body = b'{"error":"forbidden","reason":"owner-only action"}'
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.close_connection = True

@@ -1,0 +1,28 @@
+# Never ship host-built artifacts into the image build context. The build
+# stage runs its own `npm ci` + `prisma generate` on Alpine/musl; copying a
+# host-generated node_modules (glibc-linked sharp, prisma engines, etc.) over
+# that fresh tree would break the runtime. Also keep the context small/fast.
+node_modules
+**/node_modules
+.next
+out
+build
+.git
+.gitignore
+
+# local db / test artifacts
+postgres-data
+pgdata
+*.log
+
+# editor / OS cruft
+.DS_Store
+.vscode
+.idea
+
+# local env files (build.env is intentionally NOT ignored; the Dockerfile
+# needs it, and it holds only mock build-time placeholders)
+.env
+.env.*.local
+*.env
+!scripts/build.env

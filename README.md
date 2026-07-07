@@ -37,18 +37,19 @@ session table to seed, so the OpenHost integration is deliberately simple:
   lets those requests through without `zone_auth`.
 
 Because group IDs are unguessable nanoids, "knowing the URL" is the sharing
-credential — this matches the public hosted Spliit at spliit.app. If you want
-a fully private instance (no anonymous access at all), remove the
-`/groups/` and `/api/` entries from `openhost.toml`'s `public_paths`; the
-owner will still have full access, but group links will only work for
-`zone_auth`'d visitors.
+credential — this matches the public hosted Spliit at spliit.app. Creating a
+*new* group, however, is restricted to the owner (see the auth-proxy section
+below): unlike the public hosted Spliit, an anonymous visitor cannot spin up
+new groups on your instance. If you want a fully private instance (no
+anonymous access at all), remove the `/groups/` and `/api/` entries from
+`openhost.toml`'s `public_paths`; the owner will still have full access, but
+group links will only work for `zone_auth`'d visitors.
 
 ### The auth-proxy
 
-`openhost/auth_proxy.py` is a thin streaming HTTP proxy in front of the
-Next.js server. It does **not** mint cookies or gate requests (the OpenHost
-router does the gating). Its only jobs are transport-level fixes required
-for Next.js behind a reverse proxy:
+`openhost/auth_proxy.py` is a small HTTP proxy in front of the Next.js
+server. It never mints cookies and never touches disk. Most gating is done by
+the OpenHost router (via `public_paths`); the proxy's jobs are:
 
 1. Serve `/_healthz` with a static 200 for the OpenHost health check.
 2. Rewrite the upstream `Host` header from `X-Forwarded-Host` and keep the
@@ -56,9 +57,29 @@ for Next.js behind a reverse proxy:
    accepted (Next rejects forwarded actions whose `Origin` host does not
    match the forwarded host).
 3. Force `X-Forwarded-Proto: https`.
+4. Re-gate the few owner-only paths that unavoidably sit under a public
+   prefix. Because the router's `public_paths` matching is prefix-based,
+   exposing `/groups/` (needed for shared group links) also exposes the
+   fixed `/groups/create` page, the `/groups` recent-list, and the tRPC
+   `groups.create` mutation under `/api/`. For those specific paths the
+   proxy checks the router-stamped `X-OpenHost-Is-Owner` header and either
+   bounces anonymous visitors to the OpenHost login (pages) or returns a
+   403 (the create API). Everything else a shared group needs — reading a
+   group, adding/editing/deleting expenses, balances, stats, export — stays
+   public so anyone with the link can use the group fully.
 
-No credentials are ever written to disk. The bundled database is loopback-only
-and its password never leaves the container.
+The proxy reads each request and upstream response body fully into memory and
+re-frames the response with an explicit `Content-Length`, closing the
+connection after each response. Spliit's payloads are small, so this keeps
+framing simple and correct behind the router rather than optimizing for
+streaming. The bundled database is loopback-only and its password never
+leaves the container.
+
+So the effective model is: **only the zone_auth'd owner can create groups**,
+but the owner can share any group by link and recipients need no OpenHost
+account. If you want a fully private instance (no anonymous access at all),
+remove the `/groups/` and `/api/` entries from `openhost.toml`'s
+`public_paths`.
 
 ## Layout
 
